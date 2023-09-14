@@ -1,93 +1,169 @@
-use tokio::sync::{Mutex, watch::Sender, mpsc::Receiver, RwLock};
+use std::time::Instant;
+use tokio::sync::Mutex;
 
 use crate::error::{PidError, ErrorType};
-use super::sync::{PidRunMode, PidControlSync};
 
-type InputStream = tokio::sync::mpsc::Sender<f64>;
-type OutputStream = tokio::sync::watch::Receiver<Option<f64>>;
+use super::traits::{PidRunMode, PidControl};
 
-/// A wrapper around `PidControlSync` using tokio's `watch` & `mpsc` channels, allowing for real-time & concurrent value updates
 pub struct PidControlStreaming {
-    inner: PidControlSync,
-    rwlock: RwLock<PidControlSync>,
+    runmode: Mutex<PidRunMode>,
+    kp: f64,
+    ki: f64,
+    kd: f64,
+    input: f64,
+
+    output: Option<f64>, // Output variable
+    max_output: Option<f64>,
+    min_output: Option<f64>,
+
+    setpoint: f64, // Desired variable
+
+    execution_frequency_ms: u128, // Amount of milliseconds between calculations
+    last_execution: Instant,
     
-    input_value_stream: InputStream,
-    output_value_stream: OutputStream
+    last_error: Option<f64>, // error value of previous iteration
+    total_error: Option<f64>,
+    delta_error: Option<f64>,
 }
 
+impl PidControl for PidControlStreaming {}
+
 impl PidControlStreaming {
-    /// Creata a `tokio::task` that periodically runs the inner `calculate_next`
-    pub async fn start(&self) -> Result<(), PidError> {
-        // let mut inner = self.mutex.lock().await;
+    fn calculate_next(
+        runmode: PidRunMode, 
+        kp: f64, 
+        ki: Option<f64>, 
+        kd: Option<f64>, 
+        execution_frequency_ms: u128,
+        error: f64,
+        total_error: Option<f64>,
+        delta_error: Option<f64>
+    ) -> Result<f64, PidError> 
+    {
+        let (ki,kd, total_error, delta_error) = Self::check_values(runmode, ki, kd, total_error, delta_error)?;
+        
+        // I can unwrap here because of Self::check_values
+        let mut output_val: f64 = Self::calculate_proportional(kp, error);
+        match runmode {
+            PidRunMode::P => {},
+            PidRunMode::PI => {
+                output_val += Self::calculate_integral(ki.unwrap(), execution_frequency_ms, total_error);
+            },
+            PidRunMode::PD => {
+                output_val += Self::calculate_derivative(kd.unwrap(), execution_frequency_ms, delta_error);
+            },
+            PidRunMode::PID => {
+                output_val += Self::calculate_integral(ki.unwrap(), execution_frequency_ms, total_error);
+                output_val += Self::calculate_derivative(kd.unwrap(), execution_frequency_ms, delta_error);
+            },
+        };
 
-        // // Sending the output
-        // tokio::task::spawn(async move {
-        //     loop {
-        //         inner.await_next_blocking().await;
-        //         match PidControlSync::calculate_next(&mut inner) {
-        //             Ok(output) => {
 
-        //             },
-        //             Err(_) => continue,
-        //         };
-
-        //     }
-        // });
-
-
-
-
-        Ok(())
+        Ok(output_val)
     }
 
-    async fn init_streams(&mut self) {
-        let (input_tx, mut input_rx) = tokio::sync::mpsc::channel::<f64>(2);
+
+
+    fn start(&mut self) {
+        let (input_tx, input_rx) = tokio::sync::mpsc::channel::<f64>(2);
         let (output_tx, output_rx) = tokio::sync::watch::channel::<Option<f64>>(None);
 
-        self.input_value_stream = input_tx;
-        self.output_value_stream = output_rx;
+        tokio::task::spawn(async move {
+            loop {
+                // Self::calculate_next(self.runmode)
+            }
+        });
 
+        // Transmitting output values
+        tokio::task::spawn(async move {
+            // Self::calculate_next(self.runmode);
+            // output_tx.send(value)
+        });
 
-        // // Sending the output
-        // tokio::task::spawn(async move {
-        //     loop {
-        //         inner.await_next_blocking().await;
-        //         match PidControlSync::calculate_next(&mut inner) {
-        //             Ok(output) => {
-        //                 match output_tx.send(Some(output)) {
-        //                     Ok(_) => (),
-        //                     Err(_) => break
-        //                 }
-        //             },
-        //             Err(_) => continue, // The only fail case is when the function is called before it's execution frequency
-        //         };
+        // Receiving incoming input values
+        tokio::task::spawn(async move {
+            
+        });
 
-        //     }
-        // });
+    }
 
-
-        // // Receiving input values
-        // tokio::task::spawn(async move {
-        //     while let Some(value) = input_rx.recv().await {
-        //         inner.set_input_value(value);
-        //     }
+        /// Internal function that returns `Err<PidError>` upon missing required values based on `PidRunMode`
+        fn check_values(
+            runmode: PidRunMode, 
+            ki: Option<f64>, 
+            kd: Option<f64>, 
+            total_error: Option<f64>,
+            delta_error: Option<f64>
+        ) -> Result<(Option<f64>,Option<f64>,Option<f64>,Option<f64>), PidError>  
+        {
+            match runmode {
+                PidRunMode::P => {return Ok((None,None,None,None))},
+                PidRunMode::PI => {
+                    let ki = ki.ok_or_else(|| {
+                        PidError {
+                            error_type: ErrorType::MissingValue,
+                            msg: "Missing ki Value".to_string(),
+                        }
+                    })?;
+                    let total_error= total_error.ok_or_else(|| {
+                        PidError {
+                            error_type: ErrorType::MissingValue,
+                            msg: "Missing total_error Value".to_string(),
+                        }
+                    })?;
     
-        // });
-
-    }
-
-    /////////////////////// GETTERS
-    /// Clone a new `OutputStream` to send new input value's through
-    fn output_stream(&self) -> OutputStream {
-        self.output_value_stream.clone()
-    }
-    /// Clone a new `InputStream` to read the latest output value from
-    fn input_stream(&self) -> InputStream {
-        self.input_value_stream.clone()
-    }
-
-
-    // Re-exports from PidControlSync
-
+                    return Ok((Some(ki),Some(total_error),None,None)) 
+                    
+                },
+                PidRunMode::PD => {
+                    let kd = kd.ok_or_else(|| {
+                        PidError {
+                            error_type: ErrorType::MissingValue,
+                            msg: "Missing kd Value".to_string(),
+                        }
+                    })?;
+                    let delta_error = delta_error.ok_or_else(|| {
+                        PidError {
+                            error_type: ErrorType::MissingValue,
+                            msg: "Missing delta_error Value".to_string(),
+                        }
+                    })?;
+    
+                    return Ok((None,Some(kd),None,Some(delta_error)))
+                },
+                PidRunMode::PID => {
+                    let ki = ki.ok_or_else(|| {
+                        PidError {
+                            error_type: ErrorType::MissingValue,
+                            msg: "Missing ki Value".to_string(),
+                        }
+                    })?;
+                    let total_error= total_error.ok_or_else(|| {
+                        PidError {
+                            error_type: ErrorType::MissingValue,
+                            msg: "Missing total_error Value".to_string(),
+                        }
+                    })?;
+    
+                    let kd = kd.ok_or_else(|| {
+                        PidError {
+                            error_type: ErrorType::MissingValue,
+                            msg: "Missing kd Value".to_string(),
+                        }
+                    })?;
+                    let delta_error = delta_error.ok_or_else(|| {
+                        PidError {
+                            error_type: ErrorType::MissingValue,
+                            msg: "Missing delta_error Value".to_string(),
+                        }
+                    })?;
+    
+                    return Ok((Some(ki),Some(kd),Some(total_error),Some(delta_error)))
+    
+                },
+            }
+        }
+    
+   
 
 }

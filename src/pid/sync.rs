@@ -1,6 +1,8 @@
 use std::time::Instant;
 use crate::error::{PidError, ErrorType};
 
+use super::traits::PidRunMode;
+
 pub struct PidControlSync {
     runmode: PidRunMode,
     kp: f64,
@@ -121,12 +123,5 @@ impl PidControlSync {
     pub fn get_output_value(&self) -> Option<f64> {
         self.output
     }
-}
-
-pub enum PidRunMode {
-    P,
-    PI,
-    PD,
-    PID,
 }
 

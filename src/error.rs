@@ -1,6 +1,7 @@
 pub enum ErrorType {
     CalledTooSoon,
-    MutexAlreadyLocked
+    MutexAlreadyLocked,
+    MissingValue
 
 }
 
