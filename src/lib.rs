@@ -17,7 +17,6 @@
 
 pub mod pid {
     mod traits;
-    pub mod builder;
     pub mod sync;
     // #[cfg(feature = "result_stream_tokio")]
     pub mod streaming;
