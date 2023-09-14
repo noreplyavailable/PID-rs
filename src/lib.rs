@@ -16,10 +16,10 @@
 
 
 pub mod pid {
+    mod traits;
     pub mod builder;
-    pub mod traits;
     pub mod sync;
-    // #[cfg(feature = "tokio")]
+    // #[cfg(feature = "result_stream_tokio")]
     pub mod streaming;
 }
 pub mod error;
