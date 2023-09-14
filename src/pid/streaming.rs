@@ -1,21 +1,22 @@
-use std::time::Instant;
+use std::{time::Instant, sync::Arc, process::Output};
 use tokio::sync::Mutex;
 
 use crate::error::{PidError, ErrorType};
 
 use super::traits::{PidRunMode, PidControl};
 
-pub struct PidControlStreaming {
-    runmode: Mutex<PidRunMode>,
-    kp: f64,
-    ki: f64,
-    kd: f64,
-    input: f64,
+type OutputChannel = tokio::sync::watch::Receiver<Option<f64>>;
+type InputChannel = tokio::sync::mpsc::Sender<f64>;
 
-    output: Option<f64>, // Output variable
+pub struct PidControlStreaming {
+    runmode: PidRunMode,
+    kp: f64,
+    ki: Option<f64>,
+    kd: Option<f64>,
+    input_var: f64,
+
     max_output: Option<f64>,
     min_output: Option<f64>,
-
     setpoint: f64, // Desired variable
 
     execution_frequency_ms: u128, // Amount of milliseconds between calculations
@@ -23,147 +24,75 @@ pub struct PidControlStreaming {
     
     last_error: Option<f64>, // error value of previous iteration
     total_error: Option<f64>,
-    delta_error: Option<f64>,
+
+    output_channel: OutputChannel,
+    input_channel: InputChannel,
 }
 
 impl PidControl for PidControlStreaming {}
 
 impl PidControlStreaming {
-    fn calculate_next(
-        runmode: PidRunMode, 
-        kp: f64, 
-        ki: Option<f64>, 
-        kd: Option<f64>, 
-        execution_frequency_ms: u128,
-        error: f64,
-        total_error: Option<f64>,
-        delta_error: Option<f64>
-    ) -> Result<f64, PidError> 
-    {
-        let (ki,kd, total_error, delta_error) = Self::check_values(runmode, ki, kd, total_error, delta_error)?;
-        
-        // I can unwrap here because of Self::check_values
-        let mut output_val: f64 = Self::calculate_proportional(kp, error);
-        match runmode {
-            PidRunMode::P => {},
-            PidRunMode::PI => {
-                output_val += Self::calculate_integral(ki.unwrap(), execution_frequency_ms, total_error);
-            },
-            PidRunMode::PD => {
-                output_val += Self::calculate_derivative(kd.unwrap(), execution_frequency_ms, delta_error);
-            },
-            PidRunMode::PID => {
-                output_val += Self::calculate_integral(ki.unwrap(), execution_frequency_ms, total_error);
-                output_val += Self::calculate_derivative(kd.unwrap(), execution_frequency_ms, delta_error);
-            },
-        };
-
-
-        Ok(output_val)
-    }
-
-
-
-    fn start(&mut self) {
-        let (input_tx, input_rx) = tokio::sync::mpsc::channel::<f64>(2);
+    fn start (&'static mut self) {
+        let (input_tx, mut input_rx) = tokio::sync::mpsc::channel::<f64>(2);
         let (output_tx, output_rx) = tokio::sync::watch::channel::<Option<f64>>(None);
 
+        self.input_channel = input_tx;
+        self.output_channel = output_rx;
+        
+        // Sending/receiving through channels
         tokio::task::spawn(async move {
-            loop {
-                // Self::calculate_next(self.runmode)
-            }
-        });
+            // Receiving incoming input values
+            let mut input_var = self.input_var;
+            tokio::task::spawn(async move {
+                while let Some(msg) = input_rx.recv().await {
+                    input_var = msg
+                }
+            });
 
-        // Transmitting output values
-        tokio::task::spawn(async move {
-            // Self::calculate_next(self.runmode);
-            // output_tx.send(value)
-        });
-
-        // Receiving incoming input values
-        tokio::task::spawn(async move {
             
+            // Transmitting output values
+            loop {
+                // Sleep until the next cycle
+                std::thread::sleep(std::time::Duration::from_millis(Self::time_remaining(Instant::now(), self.last_execution).try_into().unwrap()));
+                let (output, error, total_error) = match Self::calculate_next(
+                    self.runmode, 
+                    self.kp, 
+                    self.ki, 
+                    self.kd, 
+                    self.execution_frequency_ms, 
+                    self.total_error, 
+                    self.last_error, 
+                    self.max_output, 
+                    self.min_output, 
+                    self.setpoint, 
+                    input_var
+                ) 
+                {
+                    Ok(a) => a,
+                    Err(e) => {eprintln!("{:?}", e);break},
+                };
+
+                self.last_execution = Instant::now();
+                self.last_error = Some(error);
+                self.total_error = total_error;
+
+                match output_tx.send(Some(output)) {
+                    Ok(_) => {
+                        #[cfg(debug_assertions)]
+                        println!("{}", output.clone())
+                    }
+                    Err(e) => {
+                        eprintln!("{:?}", e);
+                        break
+                    }
+                }
+
+            };
         });
+
+  
 
     }
 
-        /// Internal function that returns `Err<PidError>` upon missing required values based on `PidRunMode`
-        fn check_values(
-            runmode: PidRunMode, 
-            ki: Option<f64>, 
-            kd: Option<f64>, 
-            total_error: Option<f64>,
-            delta_error: Option<f64>
-        ) -> Result<(Option<f64>,Option<f64>,Option<f64>,Option<f64>), PidError>  
-        {
-            match runmode {
-                PidRunMode::P => {return Ok((None,None,None,None))},
-                PidRunMode::PI => {
-                    let ki = ki.ok_or_else(|| {
-                        PidError {
-                            error_type: ErrorType::MissingValue,
-                            msg: "Missing ki Value".to_string(),
-                        }
-                    })?;
-                    let total_error= total_error.ok_or_else(|| {
-                        PidError {
-                            error_type: ErrorType::MissingValue,
-                            msg: "Missing total_error Value".to_string(),
-                        }
-                    })?;
-    
-                    return Ok((Some(ki),Some(total_error),None,None)) 
-                    
-                },
-                PidRunMode::PD => {
-                    let kd = kd.ok_or_else(|| {
-                        PidError {
-                            error_type: ErrorType::MissingValue,
-                            msg: "Missing kd Value".to_string(),
-                        }
-                    })?;
-                    let delta_error = delta_error.ok_or_else(|| {
-                        PidError {
-                            error_type: ErrorType::MissingValue,
-                            msg: "Missing delta_error Value".to_string(),
-                        }
-                    })?;
-    
-                    return Ok((None,Some(kd),None,Some(delta_error)))
-                },
-                PidRunMode::PID => {
-                    let ki = ki.ok_or_else(|| {
-                        PidError {
-                            error_type: ErrorType::MissingValue,
-                            msg: "Missing ki Value".to_string(),
-                        }
-                    })?;
-                    let total_error= total_error.ok_or_else(|| {
-                        PidError {
-                            error_type: ErrorType::MissingValue,
-                            msg: "Missing total_error Value".to_string(),
-                        }
-                    })?;
-    
-                    let kd = kd.ok_or_else(|| {
-                        PidError {
-                            error_type: ErrorType::MissingValue,
-                            msg: "Missing kd Value".to_string(),
-                        }
-                    })?;
-                    let delta_error = delta_error.ok_or_else(|| {
-                        PidError {
-                            error_type: ErrorType::MissingValue,
-                            msg: "Missing delta_error Value".to_string(),
-                        }
-                    })?;
-    
-                    return Ok((Some(ki),Some(kd),Some(total_error),Some(delta_error)))
-    
-                },
-            }
-        }
-    
-   
 
 }
