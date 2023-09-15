@@ -132,7 +132,9 @@ impl PidControlStreaming {
                         println!("{}", output.clone())
                     }
                     Err(e) => {
+                        #[cfg(debug_assertions)]
                         eprintln!("{:?}", e);
+                        
                         break
                     }
                 }
