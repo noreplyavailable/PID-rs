@@ -54,7 +54,7 @@ pub trait PidControl {
         Ok((output_val, error, total_error))
     }
 
-    /// Internal function that returns `Err<PidError>` upon missing required values based on `PidRunMode`
+    /// Returns `Err<PidError>` upon missing required values based on `PidRunMode`
     fn check_values(
         runmode: PidRunMode, 
         ki: Option<f64>, 
